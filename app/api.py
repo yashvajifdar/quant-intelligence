@@ -57,14 +57,26 @@ def _db_stats() -> dict[str, int]:
     return stats
 
 
+def _ensure_db() -> None:
+    """Run full-refresh ETL if the database doesn't exist yet.
+
+    Handles first deploy on Render where the persistent disk starts empty.
+    Subsequent deploys skip this — the db persists on the disk.
+    """
+    if os.path.exists(DB_PATH):
+        return
+    logger.info("Database not found — running ETL full refresh (first deploy)")
+    from etl.loader import run as etl_run
+    etl_run(full_refresh=True)
+    logger.info("ETL complete — database ready at %s", DB_PATH)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Quant Intelligence API starting — db=%s", DB_PATH)
+    _ensure_db()
     stats = _db_stats()
-    if not stats:
-        logger.warning("Database not found at %s — ETL has not run yet", DB_PATH)
-    else:
-        logger.info("Database ready: %s", stats)
+    logger.info("Database ready: %s", stats)
     yield
     logger.info("Shutting down")
 
