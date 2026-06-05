@@ -1,0 +1,33 @@
+services:
+  # Web service — FastAPI recommendation API
+  # app/api.py must exist before this can be deployed
+  - type: web
+    name: quant-intelligence
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: quant-data
+      mountPath: /data
+      sizeGB: 1          # $1/month — persists quant.db across deploys
+    envVars:
+      - key: FRED_API_KEY
+        sync: false      # set manually in Render dashboard — never committed
+      - key: ANTHROPIC_API_KEY
+        sync: false      # set manually in Render dashboard — never committed
+      - key: QUANT_DB_PATH
+        value: /data/quant.db
+
+  # Cron job — daily ETL refresh (weekdays, 6am ET = 11am UTC)
+  # Shares the same persistent disk path via env var
+  - type: cron
+    name: quant-etl-daily
+    runtime: python
+    schedule: "0 11 * * 1-5"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m etl.loader
+    envVars:
+      - key: FRED_API_KEY
+        sync: false
+      - key: QUANT_DB_PATH
+        value: /data/quant.db
