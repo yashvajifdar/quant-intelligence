@@ -1,0 +1,25 @@
+name: Daily ETL
+
+on:
+  schedule:
+    # 11:00 UTC = 6:00 AM ET, weekdays only
+    - cron: "0 11 * * 1-5"
+  workflow_dispatch: # allow manual trigger from GitHub Actions tab
+
+jobs:
+  run-etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger ETL
+        run: |
+          response=$(curl -s -o /tmp/etl_response.json -w "%{http_code}" \
+            -X POST https://quant-intelligence.onrender.com/internal/run-etl \
+            -H "X-Etl-Secret: ${{ secrets.ETL_SECRET }}" \
+            -H "Content-Type: application/json")
+          echo "HTTP status: $response"
+          cat /tmp/etl_response.json
+          if [ "$response" != "200" ]; then
+            echo "ETL failed with HTTP $response"
+            exit 1
+          fi
