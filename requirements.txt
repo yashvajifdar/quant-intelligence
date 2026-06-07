@@ -5,6 +5,7 @@ fredapi>=0.5.1
 python-dotenv>=1.0.0
 requests>=2.31.0
 lxml>=5.0.0
+anthropic>=0.25.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
 pytest>=7.0.0
