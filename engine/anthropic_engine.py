@@ -76,7 +76,9 @@ After calling all tools, output ONLY a JSON object — no prose before or after:
     }
   ]
 }
-Return at most 3 recommendations. Fewer is acceptable if fewer than 3 pass all signal gates."""
+Return at most 3 recommendations. Fewer is acceptable if fewer than 3 pass all signal gates.
+If the user asks about selling, shorting, existing holdings, or anything outside your BUY-signal scope,
+still call all three tools, then return: {"recommendations": [], "note": "This engine identifies BUY opportunities only. Try: 'find me healthcare picks' or 'show me defensive stocks'."}"""
 
 
 def run(query: str) -> RecommendationSet:
@@ -209,6 +211,7 @@ def run(query: str) -> RecommendationSet:
         macro=macro_ctx,
         query=query,
         generated_at=datetime.utcnow(),
+        note=parsed.get("note"),
     )
 
 
@@ -223,11 +226,13 @@ def _parse_json(raw: str) -> dict:
     """Extract and parse the JSON object from the model's response.
 
     The model sometimes prefixes the JSON with reasoning prose. This finds
-    the outermost {...} block regardless of surrounding text.
+    the outermost {...} block regardless of surrounding text. Returns an
+    empty recommendations dict if no JSON block is found (off-topic query).
     """
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if not match:
-        raise ValueError(f"No JSON object found in model response: {raw[:200]!r}")
+        logger.warning("No JSON found in model response — returning empty set. raw=%r", raw[:300])
+        return {"recommendations": [], "note": raw[:300]}
     return json.loads(match.group())
 
 

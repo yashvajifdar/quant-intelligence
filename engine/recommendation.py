@@ -105,3 +105,4 @@ class RecommendationSet:
     macro: MacroContext           # shared regime context for the whole set
     query: str                    # original user question
     generated_at: datetime = field(default_factory=datetime.utcnow)
+    note: str | None = None       # set when engine returns no recs (off-topic query)
