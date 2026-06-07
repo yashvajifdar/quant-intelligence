@@ -57,6 +57,9 @@ def _fetch_vix(start: str, end: str) -> pd.DataFrame:
     raw = yf.download(VIX_TICKER, start=start, end=end, auto_adjust=True, progress=False)
     if raw.empty:
         return pd.DataFrame(columns=["date", "vix"])
+    # yfinance ≥0.2 returns MultiIndex columns even for a single ticker
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
     df = raw[["Close"]].reset_index()
     df.columns = ["date", "vix"]
     df["date"] = pd.to_datetime(df["date"]).dt.date
