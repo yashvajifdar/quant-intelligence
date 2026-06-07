@@ -23,6 +23,7 @@ import dataclasses
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 import duckdb
 from dotenv import load_dotenv
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 
 from portfolio import paper_trades as pt
 from portfolio.performance import compute_summary
+from signals.factors import compute_combined_factor_score
 
 load_dotenv()
 
@@ -245,6 +247,47 @@ def close_trade(portfolio_id: str, trade_id: str, req: CloseTradeRequest) -> dic
         trade_id, req.exit_price, req.exit_reason, realized_pnl,
     )
     return {"trade_id": trade_id, "realized_pnl": realized_pnl}
+
+
+_signals_cache: dict = {"data": None, "expires_at": datetime.min}
+_SIGNALS_TTL = timedelta(hours=4)
+
+
+@app.get("/signals")
+def get_signals() -> dict:
+    """Return all S&P 500 tickers ranked by composite factor score.
+
+    Scores are cross-sectionally ranked 0–100 (higher = better).
+    Composite = 60% momentum (12-1 month) + 40% low-volatility (252-day).
+    Results are cached for 4 hours — scores only change after daily ETL.
+    """
+    global _signals_cache
+    now = datetime.utcnow()
+    if _signals_cache["data"] is None or now > _signals_cache["expires_at"]:
+        scores = compute_combined_factor_score(DB_PATH)
+        if scores.empty:
+            raise HTTPException(status_code=503, detail="Signal data not available — run ETL first")
+
+        conn = duckdb.connect(DB_PATH, read_only=True)
+        universe = conn.execute(
+            "SELECT ticker, company_name, sector FROM universe"
+        ).df()
+        as_of_row = conn.execute("SELECT MAX(date) FROM prices").fetchone()
+        conn.close()
+
+        as_of = str(as_of_row[0]) if as_of_row and as_of_row[0] else None
+        merged = scores.merge(universe, on="ticker", how="left")
+        records = merged[
+            ["ticker", "company_name", "sector", "composite_score", "momentum_rank", "lowvol_rank"]
+        ].to_dict(orient="records")
+
+        _signals_cache = {
+            "data": {"tickers": records, "count": len(records), "as_of_date": as_of},
+            "expires_at": now + _SIGNALS_TTL,
+        }
+        logger.info("Signals cache refreshed: %d tickers", len(records))
+
+    return _signals_cache["data"]
 
 
 @app.post("/internal/run-etl")
