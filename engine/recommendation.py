@@ -98,6 +98,42 @@ class Recommendation:
 
 
 @dataclass
+class PositionReview:
+    """AI verdict on one open position — signal state vs entry context."""
+
+    ticker: str
+    verdict: Literal["HOLD", "ADD", "TRIM", "EXIT"]
+    conviction: int               # 1–5
+    signal_summary: str           # one-line current signal state
+    updated_thesis: str           # updated rationale
+    risk_note: str                # what to watch
+
+
+@dataclass
+class HedgeSuggestion:
+    ticker: str
+    rationale: str
+
+
+@dataclass
+class PortfolioInsights:
+    regime_impact: str
+    concentration_risk: str
+    hedge_suggestions: list[HedgeSuggestion]
+    diversifier_suggestions: list[HedgeSuggestion]
+
+
+@dataclass
+class PortfolioReview:
+    """Full output of the review engine — per-position verdicts + portfolio-level insights."""
+
+    position_reviews: list[PositionReview]
+    portfolio_insights: PortfolioInsights
+    macro: MacroContext
+    generated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
 class RecommendationSet:
     """The full response from one engine query — up to 3 recommendations."""
 

@@ -237,6 +237,34 @@ def get_portfolio(portfolio_id: str) -> dict:
     }
 
 
+@app.post("/portfolio/{portfolio_id}/review")
+def review_portfolio(portfolio_id: str) -> dict:
+    """Run the AI review engine against all open positions in a portfolio.
+
+    Calls get_macro_regime, get_technical_signals on held tickers, and
+    get_top_factor_candidates to produce per-position verdicts and
+    portfolio-level insights (concentration, hedges, diversifiers).
+    """
+    row = pt.get_portfolio(DB_PATH, portfolio_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Portfolio {portfolio_id!r} not found")
+
+    open_trades = pt.get_open_trades(DB_PATH, portfolio_id)
+    if not open_trades:
+        raise HTTPException(status_code=422, detail="No open positions to review")
+
+    try:
+        from engine.review_engine import run_review
+        result = run_review(open_trades)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        logger.exception("Review engine error for portfolio %s", portfolio_id)
+        raise HTTPException(status_code=500, detail="Review engine error")
+
+    return dataclasses.asdict(result)
+
+
 @app.post("/portfolio/{portfolio_id}/trades")
 def open_trade(portfolio_id: str, req: OpenTradeRequest) -> dict:
     """Open a new paper trade on the given portfolio.
