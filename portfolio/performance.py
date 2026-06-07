@@ -62,17 +62,17 @@ def total_return(closed_trades: list[dict]) -> float:
     return sum(_pnl_values(closed_trades))
 
 
-def win_rate(closed_trades: list[dict]) -> float:
+def win_rate(closed_trades: list[dict]) -> float | None:
     """Fraction of closed trades with realized_pnl > 0.
 
     Args:
         closed_trades: List of closed trade dicts.
 
     Returns:
-        Win rate in [0, 1]. Returns 0.0 if no closed trades.
+        Win rate in [0, 1], or None if no closed trades yet.
     """
     if not closed_trades:
-        return 0.0
+        return None
     winners = len(_winning_trades(closed_trades))
     return winners / len(closed_trades)
 
@@ -192,6 +192,6 @@ def compute_summary(
         "avg_loss": avg_loss(closed_trades),
         "sharpe_ratio": sharpe_ratio(closed_trades),
         "max_drawdown": max_drawdown(closed_trades),
-        "trade_count": len(closed_trades),
+        "trade_count": len(closed_trades) + open_count,
         "open_count": open_count,
     }

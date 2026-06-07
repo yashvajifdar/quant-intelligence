@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import duckdb
+import yfinance as yf
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +53,40 @@ _ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
 ]
+
+
+def _fetch_current_prices(tickers: list[str]) -> dict[str, float]:
+    """Return the latest available close price for each ticker via yfinance.
+
+    Uses a 5-day window so the last valid close is available even on weekends
+    or holidays when markets are closed. Returns empty dict on any failure
+    so the portfolio endpoint still responds — unrealized P&L just shows None.
+    """
+    if not tickers:
+        return {}
+    try:
+        import pandas as pd
+        raw = yf.download(tickers, period="5d", auto_adjust=True, progress=False)
+        if raw.empty:
+            return {}
+        prices: dict[str, float] = {}
+        if isinstance(raw.columns, pd.MultiIndex):
+            # Multiple tickers — raw["Close"] is a DataFrame keyed by ticker
+            close = raw["Close"]
+            for t in tickers:
+                if t in close.columns:
+                    series = close[t].dropna()
+                    if not series.empty:
+                        prices[t] = float(series.iloc[-1])
+        else:
+            # Single ticker — raw["Close"] is a Series
+            series = raw["Close"].dropna()
+            if not series.empty:
+                prices[tickers[0]] = float(series.iloc[-1])
+        return prices
+    except Exception:
+        logger.warning("Live price fetch failed for %s", tickers)
+        return {}
 
 
 def _db_stats() -> dict[str, int]:
@@ -181,6 +216,18 @@ def get_portfolio(portfolio_id: str) -> dict:
     open_trades = pt.get_open_trades(DB_PATH, portfolio_id)
     closed_trades = pt.get_closed_trades(DB_PATH, portfolio_id)
     summary = compute_summary(closed_trades, open_count=len(open_trades))
+
+    # Attach live unrealized P&L to each open trade
+    tickers = [t["ticker"] for t in open_trades]
+    current_prices = _fetch_current_prices(tickers)
+    for trade in open_trades:
+        cp = current_prices.get(trade["ticker"])
+        if cp is not None:
+            trade["unrealized_pnl"] = round((cp - trade["entry_price"]) * trade["shares"], 2)
+            trade["current_price"] = round(cp, 2)
+        else:
+            trade["unrealized_pnl"] = None
+            trade["current_price"] = None
 
     return {
         "portfolio": row,
