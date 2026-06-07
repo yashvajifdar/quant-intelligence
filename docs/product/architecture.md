@@ -1,6 +1,6 @@
 # Quant Intelligence — Architecture & Design Document
 
-*Last updated: 2026-06-05. Reflects actual codebase state. Sections 5–7 describe planned components.*
+*Last updated: 2026-06-07. Reflects actual codebase state.*
 
 **Not financial advice.** All recommendations are for paper trading and educational/demonstration purposes only.
 
@@ -19,50 +19,56 @@ This platform solves that for one investor: ingest daily S&P 500 data, compute h
 ```
 Data Sources
 ────────────────────────────────────────────────────────────────
-  yfinance (unofficial)          FRED API               Unusual Whales
-  S&P 500 OHLCV                  T10Y2Y / FEDFUNDS       Options sweeps
-  Fundamentals (P/E, ROE…)       CPIAUCSL               Block trades
-  ^VIX                                                   Dark pool prints
-         │                              │                       │
-         └──────────────────┬───────────┘                       │
-                            ▼                                   │
-ETL Pipeline  (etl/)                                            │
-────────────────────────────────────────────────────────────────│──
-  universe.py ──► Wikipedia S&P 500 list                        │
-  ingest_prices.py ──► OHLCV batch download (100 tickers/batch) │
-  ingest_macro.py  ──► FRED + VIX, daily forward-fill           │
-  loader.py        ──► orchestrator, quality report             │
-         │                                                       │
-         ▼                                                       │
-DuckDB Warehouse  (data/quant.db)                               │
-────────────────────────────────────────────────────────────────│──
-  universe   prices   fundamentals   macro                      │
-  [signals — planned]   [paper_trades — planned]                │
-         │                                                       │
-         ▼                                                       │
-Signals Layer  (signals/ — planned)                             │
-────────────────────────────────────────────────────────────────│──
-  factors.py        ──► Momentum 12-1, Value, Quality, Low-Vol  │
-  technical.py      ──► MA50/200, RSI 14, MACD 12/26/9, ATR 14  │
-  macro_regime.py   ──► RISK_ON / RISK_OFF / TRANSITIONAL / CRISIS
-  options_flow.py ◄─────────────────────────────────────────────┘
+  yfinance (unofficial)          FRED API
+  S&P 500 OHLCV                  T10Y2Y / FEDFUNDS
+  Fundamentals (P/E, ROE…)       CPIAUCSL
+  ^VIX
+         │                              │
+         └──────────────────┬───────────┘
+                            ▼
+ETL Pipeline  (etl/)
+────────────────────────────────────────────────────────────────
+  universe.py ──► Wikipedia S&P 500 list
+  ingest_prices.py ──► OHLCV batch download (100 tickers/batch)
+  ingest_macro.py  ──► FRED + VIX, daily forward-fill
+  loader.py        ──► orchestrator, quality report
          │
          ▼
-AI Engine  (engine/ — planned)
+DuckDB Warehouse  (data/quant.db)
+────────────────────────────────────────────────────────────────
+  universe   prices   fundamentals   macro
+  [portfolios + paper_trades — portfolio layer]
+         │
+         ▼
+Signals Layer  (signals/)
+────────────────────────────────────────────────────────────────
+  factors.py        ──► Momentum 12-1, Low-Vol (value/quality planned)
+  technical.py      ──► MA50/200, RSI, MACD histogram, ATR, volume ratio
+  macro_regime.py   ──► RISK_ON / TRANSITIONAL / RISK_OFF / CRISIS
+  options_flow.py   ──► NOT YET BUILT (planned)
+         │
+         ▼  (called at query time via TOOL_DISPATCH — not persisted)
+AI Engine  (engine/)
 ──────────────────────────────────────────────────────────────────
-  engine_tools.py      ──► tool definitions, signal dispatch map
-  anthropic_engine.py  ──► Anthropic tool-use, structured output
-  recommendation.py    ──► typed recommendation dataclass
+  engine_tools.py      ──► 3 provider-neutral tool definitions, TOOL_DISPATCH map
+  anthropic_engine.py  ──► multi-tool loop, structured JSON output
+  recommendation.py    ──► typed dataclasses, reward_risk ≥ 2.0 enforced
          │
          ▼
-API + UI
+FastAPI  (app/api.py)
 ──────────────────────────────────────────────────────────────────
-  FastAPI (app/api.py)   ──► POST /recommend, GET /portfolio, GET /health
-  Streamlit (app/main.py) ──► local development UI
+  POST /recommend   GET /health
+  POST /portfolio   GET /portfolio/{id}
+  POST /portfolio/{id}/trades
+  PATCH /portfolio/{id}/trades/{trade_id}
+  GET /leaderboard
+  GET /signals
+  Deployed on Render at https://quant-intelligence.onrender.com
          │
          ▼
-  yashvajifdar.com/demos/quant  (Next.js — calls FastAPI)
-  Public paper portfolio + current recommendations
+  Next.js Dashboard (personal-website/app/demos/quant/)
+  Deployed on Vercel at yashvajifdar.com/demos/quant
+  5-tab UI: Today, Picks, Portfolio, Universe, Learn
 ```
 
 ---
@@ -145,17 +151,45 @@ All tables live in `data/quant.db` (DuckDB). Schema is defined in `etl/schema.py
 
 **Populated by:** `etl/ingest_macro.py` → `load_macro()`. FRED series are daily or monthly; monthly series are forward-filled via `resample("D").last().ffill()` before writing.
 
-### 3.5 `signals` (planned)
+### 3.5 `signals` (computed at query time — not a persisted table)
 
-**Grain:** one row = one ticker × one date
+Signal functions in `signals/` are called at query time by the AI engine via `TOOL_DISPATCH` in `engine/engine_tools.py`. Results are passed directly to the model as tool results; they are not written to DuckDB. A persistent `signals` gold table has not been implemented and requires an ADR before it is added.
 
-Computed gold layer: all factor scores, technical indicators, and macro regime label joined per ticker per trading day. Written by the signals layer; read by the AI engine. Schema TBD — requires ADR before implementation.
+### 3.6 `portfolios` and `paper_trades`
 
-### 3.6 `paper_trades` (planned)
+Two tables managed by `portfolio/paper_trades.py`. Schema is created by `CREATE TABLE IF NOT EXISTS` (idempotent). Multi-user: each portfolio has a UUID primary key.
 
-**Grain:** one row = one paper trade entry or exit
+**`portfolios`**
 
-Fields: `ticker`, `direction`, `entry_date`, `entry_price`, `exit_date`, `exit_price`, `pnl`, `recommendation_id`, `thesis`. Schema TBD.
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `display_name` | TEXT | |
+| `is_primary` | BOOLEAN | |
+| `created_at` | TIMESTAMP | |
+| `last_active_at` | TIMESTAMP | |
+
+**`paper_trades`**
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | UUID |
+| `portfolio_id` | TEXT FK | References `portfolios.id` |
+| `ticker` | TEXT | |
+| `action` | TEXT | `BUY`, `AVOID`, or `WATCH` |
+| `entry_date` | DATE | |
+| `entry_price` | DOUBLE | Prior day's close at time of recommendation |
+| `shares` | DOUBLE | |
+| `stop` | DOUBLE | Stop-loss price |
+| `target` | DOUBLE | Target price |
+| `signal_snapshot` | TEXT | JSON blob of signals at entry time |
+| `thesis` | TEXT | 1–3 sentence plain-English rationale |
+| `exit_date` | DATE | NULL for open trades |
+| `exit_price` | DOUBLE | NULL for open trades |
+| `exit_reason` | TEXT | NULL for open trades |
+| `realized_pnl` | DOUBLE | NULL for open trades |
+
+**Key functions:** `open_trade()`, `close_trade()`, `purge_stale_portfolios()` (90-day cutoff), `get_leaderboard()` (only portfolios with ≥1 closed trade).
 
 ---
 
@@ -170,12 +204,12 @@ The orchestrator is `etl/loader.py`. Run it with `python -m etl.loader` (increme
 | `etl/schema.py` | Defines all four CREATE TABLE statements. `initialize_schema(db_path)` creates tables if they do not exist. Idempotent. |
 | `etl/universe.py` | Fetches S&P 500 constituent list from Wikipedia via `pandas.read_html`. Replaces `.` with `-` in tickers. Upserts on ticker PK. Called on every run. |
 | `etl/ingest_prices.py` | Downloads OHLCV via `yfinance.download()` in batches of 100 tickers. `auto_adjust=True` means close equals adj_close. Incremental: last 7 days. Full refresh: 2 years. Batch failures are counted and reported; the run continues on partial failure. |
-| `etl/ingest_macro.py` | Fetches `T10Y2Y`, `FEDFUNDS`, `CPIAUCSL` from FRED via `fredapi`. Fetches `^VIX` from yfinance. Merges on date; forward-fills monthly series to daily. Incremental: 45-day lookback (longer than prices to catch monthly FRED updates). |
+| `etl/ingest_macro.py` | Fetches `T10Y2Y`, `FEDFUNDS`, `CPIAUCSL` from FRED via `fredapi`. Fetches `^VIX` from yfinance. Merges on date; forward-fills monthly series to daily. Incremental: 45-day lookback (longer than prices to catch monthly FRED updates). `_fetch_vix()` flattens MultiIndex columns before selecting Close — yfinance ≥0.2 returns MultiIndex even for a single ticker; without flattening, `raw[["Close"]]` silently returns an empty frame (commit a36be54). |
 | `etl/loader.py` | Calls `_validate_env()` to fail loudly if `FRED_API_KEY` is absent. Runs universe → prices → macro in sequence. Prints the quality report to stdout. |
 
 ### 4.2 Batch strategy
 
-Price ingestion batches 100 tickers per `yfinance.download()` call. yfinance returns MultiIndex columns for multi-ticker batches; `ingest_prices.py` normalizes these to a long-format DataFrame with `stack(level="Ticker")`. A batch failure increments `batches_failed` and logs the error; subsequent batches continue. The quality report surface the failure count.
+Price ingestion batches 100 tickers per `yfinance.download()` call. yfinance returns MultiIndex columns for multi-ticker batches; `ingest_prices.py` normalizes these to a long-format DataFrame with `stack(level="Ticker")`. A batch failure increments `batches_failed` and logs the error; subsequent batches continue. The quality report surfaces the failure count.
 
 ### 4.3 Full-refresh vs incremental
 
@@ -186,38 +220,40 @@ Price ingestion batches 100 tickers per `yfinance.download()` call. yfinance ret
 
 ---
 
-## 5. Signals Layer (planned)
+## 5. Signals Layer
 
-All signal functions will live in `signals/`. Each function takes a DuckDB connection or DataFrame and returns a normalized score between 0 and 1, ranked cross-sectionally across the S&P 500 universe on a given date.
+All signal functions live in `signals/`. They are called at query time by the AI engine via `TOOL_DISPATCH`; results are not persisted to DuckDB.
 
 Every signal function requires a known-value test before merge. The `quant-finance` agent reviews all signal logic before it ships.
 
 ### 5.1 Factor signals (`signals/factors.py`)
 
-| Factor | Input data | Formula sketch | High score means |
-|---|---|---|---|
-| Momentum 12-1 | `prices` | `(price_today / price_12m_ago) - 1`, excluding last 30 days | Stock outperformed peers over past year |
-| Value composite | `fundamentals` | Inverse-rank average of P/E, P/B, P/S, EV/EBITDA | Cheap relative to fundamentals |
-| Quality composite | `fundamentals` | Rank average of ROE, gross margin, inverse(debt_equity), FCF | Profitable, low-debt, cash-generating |
-| Low volatility | `prices` | `1 / std_dev(daily_returns, 252)`, cross-sectionally ranked | Low realized volatility over past year |
+| Factor | Input data | Formula sketch | High score means | Status |
+|---|---|---|---|---|
+| Momentum 12-1 | `prices` | `(price_today / price_12m_ago) - 1`, excluding last 30 days | Stock outperformed peers over past year | Built |
+| Low volatility | `prices` | `1 / std_dev(daily_returns, 252)`, cross-sectionally ranked | Low realized volatility over past year | Built |
+| Value composite | `fundamentals` | Inverse-rank average of P/E, P/B, P/S, EV/EBITDA | Cheap relative to fundamentals | Planned |
+| Quality composite | `fundamentals` | Rank average of ROE, gross margin, inverse(debt_equity), FCF | Profitable, low-debt, cash-generating | Planned |
 
 Value and quality composites use cross-sectional ranking before averaging to prevent any single metric from dominating.
 
 ### 5.2 Technical signals (`signals/technical.py`)
 
+All five signals are built.
+
 | Signal | Parameters | What it captures |
 |---|---|---|
 | MA crossover | 50-day SMA, 200-day SMA | Intermediate vs long-term trend alignment |
 | RSI | 14-period | Overbought (> 70) / oversold (< 30) conditions |
-| MACD crossover | EMA(12), EMA(26), signal EMA(9) | Momentum acceleration and deceleration |
+| MACD histogram | EMA(12), EMA(26), signal EMA(9) | Momentum acceleration and deceleration |
 | ATR | 14-period true range average | Daily volatility magnitude; drives stop-loss placement |
-| Volume confirmation | 20-day average volume | Breakout validity: requires > 150% of average |
+| Volume ratio | 20-day average volume | Breakout validity: requires > 150% of average |
 
 Technical signals are used as entry filters and for risk parameter computation (ATR stop placement). They do not rank cross-sectionally.
 
 ### 5.3 Macro regime classifier (`signals/macro_regime.py`)
 
-Classifies the current market environment into one of four states, gating which recommendations the AI engine surfaces.
+Built. Classifies the current market environment into one of four states, gating which recommendations the AI engine surfaces.
 
 | Regime | Conditions | AI engine behavior |
 |---|---|---|
@@ -226,36 +262,33 @@ Classifies the current market environment into one of four states, gating which 
 | `RISK_OFF` | `t10y2y < 0` or `vix > 25`, SPX near or below 200-day SMA | Only high-quality, low-volatility longs; no aggressive momentum |
 | `CRISIS` | `vix > 35` | Defensive posture only; no new longs |
 
-Regime is computed daily from `macro` table data and stored in the `signals` table alongside per-ticker scores.
+Regime is computed from the `macro` table and passed to the AI engine as a tool result on every query.
 
 ### 5.4 Options flow (`signals/options_flow.py`)
 
-Reads Unusual Whales data (API method TBD — see Open Questions). Flags tickers with:
-
-- Unusual call sweep volume (> 3× 20-day average options volume)
-- Above-ask aggressive sweeps on near-term OTM calls
-- Rising open interest alongside volume spike (new positioning, not roll)
-
-Options flow is an additive +1 modifier to the AI engine's conviction score. It never generates a standalone recommendation.
+NOT YET BUILT. See Open Questions for the Unusual Whales API decision. Write an ADR before implementing.
 
 ---
 
-## 6. AI Engine (planned)
+## 6. AI Engine
 
-The engine pattern is the same as lumber-ai-analytics: Anthropic tool use, structured output, provider-agnostic tool definitions.
+The engine pattern is the same as lumber-ai-analytics: Anthropic tool use, structured output, provider-agnostic tool definitions. Model: `claude-sonnet-4-6`. Max tokens: 2048.
 
 ### 6.1 Architecture
 
-`engine_tools.py` holds provider-neutral tool definitions. `anthropic_engine.py` converts these to Anthropic wire format and runs a two-turn flow:
+`engine_tools.py` holds 3 provider-neutral tool definitions: `get_macro_regime`, `get_top_factor_candidates`, `get_technical_signals`. `TOOL_DISPATCH` maps each name to its callable in `signals/`.
 
-- **Turn 1:** model selects which signal functions to call and with what parameters
-- **Turn 2:** model reads the signal results and constructs a structured recommendation
+`anthropic_engine.py` converts tool definitions to Anthropic wire format and runs a **multi-tool loop** — not a fixed two-turn exchange. The loop continues until `stop_reason != "tool_use"`. On a typical query, the model makes 3 sequential tool calls (macro regime, then factor candidates, then technical signals) before generating its final recommendation. `_parse_json()` uses regex to extract JSON from model prose.
 
-The engine never writes SQL or reads raw tables. It calls signal functions via the dispatch map.
+The engine never writes SQL or reads raw tables. It calls signal functions via `TOOL_DISPATCH`.
+
+POST `/recommend` calls `engine.anthropic_engine.run()` and returns `dataclasses.asdict(result)`. Returns 503 on `ValueError` (missing key), 500 on other engine errors.
+
+GET `/signals` calls `compute_combined_factor_score(DB_PATH)`, joins with the `universe` table for `company_name` and `sector`, and returns all 503 tickers ranked by composite factor score. Results are cached in memory for 4 hours (`_signals_cache` dict keyed by `expires_at`). `as_of_date` is pulled from `MAX(date)` in the `prices` table.
 
 ### 6.2 Recommendation output format
 
-Every recommendation is a typed dataclass (`engine/recommendation.py`):
+Every recommendation is a typed dataclass (`engine/recommendation.py`). `Recommendation.__post_init__` enforces `reward_risk ≥ 2.0` and `conviction` in range 1–5 at construction time.
 
 | Field | Type | Example |
 |---|---|---|
@@ -263,15 +296,14 @@ Every recommendation is a typed dataclass (`engine/recommendation.py`):
 | `action` | Literal["BUY", "AVOID", "WATCH"] | `"BUY"` |
 | `conviction` | int (1–5) | `4` |
 | `macro_regime` | str | `"RISK_ON"` |
-| `signal_summary` | dict | `{"momentum": 0.87, "quality": 0.72, "rsi": 58, ...}` |
+| `signal_summary` | dict | `{"momentum": 0.87, "low_vol": 0.72, "rsi": 58, ...}` |
 | `thesis` | str | 1–3 sentence plain-English rationale |
 | `entry_price` | float | Closing price on recommendation date |
 | `stop_loss` | float | Entry minus 1.25× ATR |
 | `target` | float | Entry plus 2× (entry minus stop_loss) |
-| `reward_risk` | float | Must be ≥ 2.0 |
-| `paper_trade` | bool | `True` if the engine is logging this to `paper_trades` |
+| `reward_risk` | float | Must be ≥ 2.0 — enforced in `__post_init__` |
 
-Recommendations with `reward_risk < 2.0` are suppressed before returning to the caller.
+The engine returns a `RecommendationSet` containing: `recommendations` (list of `Recommendation`), `macro` (`MacroContext`).
 
 ### 6.3 Lookahead bias prevention
 
@@ -279,27 +311,34 @@ Signals are computed using the **prior trading day's close**. Paper trade entrie
 
 ---
 
-## 7. Paper Portfolio (planned)
+## 7. Paper Portfolio
 
-### 7.1 Trade log
+### 7.1 Schema
 
-`portfolio/paper_trades.py` writes to the `paper_trades` table in `quant.db`. Every row records: ticker, entry date, entry price (prior day's close at time of recommendation), exit date, exit price, P&L in dollars and percent, and the `recommendation_id` linking back to the engine output.
+`portfolio/paper_trades.py` manages two tables in `quant.db`: `portfolios` and `paper_trades`. See Section 3.6 for the full column definitions. Schema creation is idempotent (`CREATE TABLE IF NOT EXISTS`). Position size is capped at 10% of `PAPER_ACCOUNT_VALUE` (default $100,000, set via environment variable).
 
 ### 7.2 Performance metrics
 
-`portfolio/performance.py` computes:
+`portfolio/performance.py` exposes pure functions.
 
-| Metric | Target | Notes |
-|---|---|---|
-| Sharpe ratio | > 1.2 | Annualized; risk-free rate from FRED `FEDFUNDS` |
-| Max drawdown | < -20% | Peak-to-trough decline |
-| Win rate | > 45% | Profitable closed trades / total closed trades |
-| Avg win/loss | > 2.0 | Average winner / average loser |
-| Total return | Benchmark: SPY | Annualized, reported at 6-month intervals |
+| Function | Behavior |
+|---|---|
+| `sharpe_ratio(closed_trades)` | Annualized. Uses `TRADING_DAYS_PER_YEAR = 252`. Returns `None` if fewer than 2 closed trades. |
+| `max_drawdown(closed_trades)` | Peak-to-trough decline across the closed trade sequence. |
+| `compute_summary(closed_trades, open_count)` | Returns a dict with Sharpe, max drawdown, win rate, avg win/loss, and total return. |
+
+Target benchmarks (not enforced in code):
+
+| Metric | Target |
+|---|---|
+| Sharpe ratio | > 1.2 |
+| Max drawdown | < -20% |
+| Win rate | > 45% |
+| Avg win/loss | > 2.0 |
 
 ### 7.3 Public reporting
 
-Performance reports are published to yashvajifdar.com/demos/quant at 6-month intervals. Reports include: total return vs SPY, Sharpe, max drawdown, win rate, and a trade-by-trade log. All trades are timestamped and immutable once logged.
+Performance is visible at yashvajifdar.com/demos/quant via the Portfolio tab. All trades are timestamped and immutable once logged.
 
 ---
 
@@ -310,10 +349,11 @@ Performance reports are published to yashvajifdar.com/demos/quant at 6-month int
 | Component | Type | Details |
 |---|---|---|
 | Web service | FastAPI (`app/api.py`) | `uvicorn app.api:app --host 0.0.0.0 --port $PORT` |
-| Cron job | Daily ETL | `python -m etl.loader` at 6:00 AM ET |
 | Persistent disk | 1 GB, mounted at `/data` | $1/month; `QUANT_DB_PATH=/data/quant.db` |
 
 The persistent disk is required because Render's filesystem resets on redeploy. Without it, every deploy destroys the price history, and a full 10-minute backfill runs on every code push.
+
+Daily ETL is triggered via GitHub Actions (see `.github/workflows/daily-etl.yml`), not a Render cron job. Render persistent disks attach to one service at a time — a Render cron job would write to a different database instance than the web service reads from, producing stale or split data.
 
 ### 8.2 Environment variables
 
@@ -321,7 +361,25 @@ The persistent disk is required because Render's filesystem resets on redeploy. 
 |---|---|---|
 | `FRED_API_KEY` | Yes | Render environment, `.env` locally |
 | `QUANT_DB_PATH` | Yes | Render environment (`/data/quant.db`), `.env` locally |
-| `ANTHROPIC_API_KEY` | When AI engine ships | Render environment, `.env` locally |
+| `ANTHROPIC_API_KEY` | Yes | Render environment, `.env` locally |
+| `PAPER_ACCOUNT_VALUE` | Yes | Render environment (`100000`), `.env` locally |
+
+### 8.3 Frontend deployment
+
+The Next.js dashboard is deployed on Vercel at yashvajifdar.com/demos/quant.
+
+| Item | Value |
+|---|---|
+| Source | `personal-website/app/demos/quant/page.tsx` |
+| API client | `personal-website/lib/quant-api.ts` |
+| Design token | `quant.DEFAULT = #0d9488` (teal-600) |
+| Env var (Vercel) | `NEXT_PUBLIC_QUANT_API_URL=https://quant-intelligence.onrender.com` |
+| Local dev env var | `NEXT_PUBLIC_QUANT_API_URL=http://localhost:8002` |
+| Portfolio ID persistence | `localStorage` key `"quant_portfolio_id"` |
+
+The Universe tab (Tab 4) is live. `UniverseTab.tsx` fetches `GET /signals` on mount and renders all 503 tickers in a sortable (composite/momentum/low-vol), searchable, sector-filtered table. Sector color badges applied. Responsive: sector column hidden on mobile, momentum and low-vol columns hidden below md breakpoint. Interfaces `SignalTicker` and `SignalsResponse` and the `fetchSignals()` function live in `personal-website/lib/quant-api.ts`.
+
+Trigger a Vercel redeploy by pushing to `main` on the `personal-website` repo.
 
 ---
 
@@ -355,8 +413,10 @@ Same rationale as lumber-ai-analytics. The model selects from pre-defined signal
 
 ## 10. Open Questions
 
-1. **Unusual Whales API:** No official public API exists. The community Python client and public feed are the current options. This is the most fragile dependency in the planned stack. Write an ADR before implementing `options_flow.py`. Options: (a) scrape the public feed, (b) use the unofficial Python client, (c) skip options flow for MVP and add it in M4.
+1. **Unusual Whales API:** No official public API exists. The community Python client and public feed are the current options. This is the most fragile dependency in the planned stack. Write an ADR before implementing `options_flow.py`. Options: (a) scrape the public feed, (b) use the unofficial Python client, (c) skip options flow for MVP.
 
 2. **Survivorship bias in any backtesting:** The universe table is loaded from Wikipedia's current S&P 500 list. Historical constituents that have since been removed are absent. Any backtest using this universe will overstate returns. This limitation must be documented prominently on any public-facing performance page. True point-in-time universe requires a paid data source.
 
 3. **Brokerage execution:** If the platform ever moves from paper to live trading, brokerage API integration (Alpaca, IBKR) introduces regulatory, security, and operational complexity that is out of scope for this project in its current form. No brokerage integration should be added without a separate architecture review.
+
+4. **ETL scheduling:** Daily ETL runs via GitHub Actions on schedule `0 11 * * 1-5`. If the workflow needs to run outside market hours or on weekends, update the cron expression in `.github/workflows/daily-etl.yml` and verify the `ETL_SECRET` secret is set in repo Settings → Secrets and variables → Actions.
