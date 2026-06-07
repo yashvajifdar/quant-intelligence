@@ -42,8 +42,8 @@ def _validate_env() -> None:
         )
 
 
-def run(full_refresh: bool = False) -> None:
-    """Run the full ETL pipeline and print a data quality report."""
+def run(full_refresh: bool = False) -> dict:
+    """Run the full ETL pipeline, print a data quality report, and return it as a dict."""
     _validate_env()
     start_time = datetime.now()
     mode = "FULL REFRESH" if full_refresh else "INCREMENTAL"
@@ -75,6 +75,15 @@ def run(full_refresh: bool = False) -> None:
             "%d price batches failed — check logs above for details",
             prices_result.batches_failed,
         )
+
+    return {
+        "mode": mode,
+        "universe_rows": universe_result.rows_written,
+        "price_rows": prices_result.rows_written,
+        "price_batches_failed": prices_result.batches_failed,
+        "macro_rows": macro_result.rows_written,
+        "elapsed_s": round(elapsed, 1),
+    }
 
 
 if __name__ == "__main__":

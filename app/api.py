@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 
 import duckdb
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -42,6 +42,7 @@ logging.basicConfig(
 logger = logging.getLogger("quant_api")
 
 DB_PATH = os.environ.get("QUANT_DB_PATH", "data/quant.db")
+ETL_SECRET = os.environ.get("ETL_SECRET", "")
 
 _ALLOWED_ORIGINS = [
     "https://yashvajifdar.com",
@@ -244,6 +245,27 @@ def close_trade(portfolio_id: str, trade_id: str, req: CloseTradeRequest) -> dic
         trade_id, req.exit_price, req.exit_reason, realized_pnl,
     )
     return {"trade_id": trade_id, "realized_pnl": realized_pnl}
+
+
+@app.post("/internal/run-etl")
+def run_etl(x_etl_secret: str = Header(default="")) -> dict:
+    """Trigger an incremental ETL run. Called by cron-job.org on a daily schedule.
+
+    Requires the X-Etl-Secret header to match the ETL_SECRET environment variable.
+    Returns the quality report dict on success.
+    """
+    if not ETL_SECRET or x_etl_secret != ETL_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.info("ETL triggered via /internal/run-etl")
+    try:
+        from etl.loader import run as etl_run
+        report = etl_run(full_refresh=False)
+        logger.info("ETL complete: %s", report)
+        return {"status": "ok", "report": report}
+    except Exception as exc:
+        logger.exception("ETL failed")
+        raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
 
 
 @app.get("/leaderboard")
