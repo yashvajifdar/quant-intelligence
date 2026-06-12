@@ -170,6 +170,7 @@ In the Render web service settings under **Environment**:
 | `QUANT_DB_PATH` | `/data/quant.db` |
 | `ANTHROPIC_API_KEY` | Your Anthropic API key (required — `/recommend` returns 503 without it) |
 | `PAPER_ACCOUNT_VALUE` | `100000` |
+| `ETL_SECRET` | A secret string shared between Render and GitHub Actions. Must match the `ETL_SECRET` repository secret in GitHub (Settings → Secrets → Actions). |
 
 ### 5.4 Configure the daily ETL (GitHub Actions)
 
@@ -280,7 +281,17 @@ curl -X PATCH https://quant-intelligence.onrender.com/portfolio/{portfolio_id}/t
 
 Sets `exit_date` to today, computes and stores `realized_pnl`.
 
-### 7.5 Get the leaderboard
+### 7.5 Review open positions (AI analysis)
+
+```bash
+curl -X POST https://quant-intelligence.onrender.com/portfolio/{portfolio_id}/review
+```
+
+Runs the review engine against all open positions. Takes 20–45 seconds. Returns per-position verdicts (`HOLD`, `ADD`, `TRIM`, `EXIT`) with updated thesis and risk notes, plus portfolio-level insights: regime impact, concentration risk, hedge suggestions, and diversifier picks from the top factor candidates.
+
+Returns `422` if the portfolio has no open trades. Returns `503` if `ANTHROPIC_API_KEY` is missing. Returns `500` on engine failure — check Render logs.
+
+### 7.6 Get the leaderboard
 
 ```bash
 curl https://quant-intelligence.onrender.com/leaderboard
@@ -288,7 +299,7 @@ curl https://quant-intelligence.onrender.com/leaderboard
 
 Returns portfolios ranked by Sharpe ratio. Only portfolios with at least 1 closed trade appear.
 
-### 7.6 Get all tickers ranked by factor score
+### 7.7 Get all tickers ranked by factor score
 
 ```bash
 curl https://quant-intelligence.onrender.com/signals
@@ -394,3 +405,5 @@ Follow every step. Skipping step 3 ships untested signal logic; skipping step 5 
 | VIX data missing from macro table entirely | yfinance returned no data for `^VIX` | Verify the date range passed to `_fetch_vix()`. `^VIX` data is available from 1990 onward. If the issue persists, check yfinance version: `pip show yfinance`. |
 | Live site shows "No recommendations yet" and never loads | `ANTHROPIC_API_KEY` not set on Render, or Render has not picked up a recently added env var | In the Render dashboard, verify `ANTHROPIC_API_KEY` is set under **Environment**. Then click **Manual Deploy** to force the service to restart with the new value. |
 | `error: Port 8002 already in use` when running uvicorn locally | Previous uvicorn process still running in the background | `lsof -ti:8002 \| xargs kill -9` then restart uvicorn. |
+| `/recommend` returns `500` in under 1 second | Anthropic credit balance is depleted — the API call is rejected before any tool runs | Top up credits at console.anthropic.com → Plans & Billing. No code change needed. |
+| `/portfolio/{id}/review` returns `500` | Review engine failure — same causes as `/recommend` | Check Render logs for the traceback. Most common: depleted Anthropic credits or a malformed tool response. |

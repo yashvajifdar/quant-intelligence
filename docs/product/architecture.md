@@ -1,6 +1,6 @@
 # Quant Intelligence — Architecture & Design Document
 
-*Last updated: 2026-06-07. Reflects actual codebase state.*
+*Last updated: 2026-06-12. Reflects actual codebase state.*
 
 **Not financial advice.** All recommendations are for paper trading and educational/demonstration purposes only.
 
@@ -51,24 +51,32 @@ Signals Layer  (signals/)
 AI Engine  (engine/)
 ──────────────────────────────────────────────────────────────────
   engine_tools.py      ──► 3 provider-neutral tool definitions, TOOL_DISPATCH map
-  anthropic_engine.py  ──► multi-tool loop, structured JSON output
-  recommendation.py    ──► typed dataclasses, reward_risk ≥ 2.0 enforced
+  anthropic_engine.py  ──► new-picks engine: multi-tool loop, structured JSON output
+  review_engine.py     ──► position review engine: HOLD/ADD/TRIM/EXIT per position
+  recommendation.py    ──► typed dataclasses: Recommendation, RecommendationSet,
+                           PositionReview, PortfolioReview, PortfolioInsights,
+                           HedgeSuggestion; reward_risk ≥ 2.0 enforced
          │
          ▼
 FastAPI  (app/api.py)
 ──────────────────────────────────────────────────────────────────
-  POST /recommend   GET /health
-  POST /portfolio   GET /portfolio/{id}
+  GET  /health
+  POST /recommend
+  GET  /signals                           (4h in-memory cache)
+  POST /internal/run-etl                  (ETL_SECRET header required)
+  POST /portfolio
+  GET  /portfolio/{id}                    (includes live unrealized P&L)
   POST /portfolio/{id}/trades
   PATCH /portfolio/{id}/trades/{trade_id}
-  GET /leaderboard
-  GET /signals
+  POST /portfolio/{id}/review             (AI position review)
+  GET  /leaderboard
   Deployed on Render at https://quant-intelligence.onrender.com
          │
          ▼
   Next.js Dashboard (personal-website/app/demos/quant/)
   Deployed on Vercel at yashvajifdar.com/demos/quant
-  5-tab UI: Today, Picks, Portfolio, Universe, Learn
+  4-tab UI: Picks | Portfolio | Universe | Learn
+  Zod runtime validation on all API responses (lib/quant-api.ts)
 ```
 
 ---
@@ -282,9 +290,13 @@ The engine pattern is the same as lumber-ai-analytics: Anthropic tool use, struc
 
 The engine never writes SQL or reads raw tables. It calls signal functions via `TOOL_DISPATCH`.
 
-POST `/recommend` calls `engine.anthropic_engine.run()` and returns `dataclasses.asdict(result)`. Returns 503 on `ValueError` (missing key), 500 on other engine errors.
+**New picks engine** (`anthropic_engine.py`): `POST /recommend` calls `run(query)` and serializes the `RecommendationSet` via `dataclasses.asdict()`. Returns 503 on `ValueError` (missing API key), 500 on other errors. Off-topic queries (e.g. "what should I sell?") return `{"recommendations": [], "note": "..."}` rather than crashing — the model is instructed to call all three tools and then return the note-only JSON.
 
-GET `/signals` calls `compute_combined_factor_score(DB_PATH)`, joins with the `universe` table for `company_name` and `sector`, and returns all 503 tickers ranked by composite factor score. Results are cached in memory for 4 hours (`_signals_cache` dict keyed by `expires_at`). `as_of_date` is pulled from `MAX(date)` in the `prices` table.
+**Position review engine** (`review_engine.py`): `POST /portfolio/{id}/review` fetches open trades from the DB, formats them as context in the user message, then runs the same 3-tool loop (macro → technical signals on held tickers → top 20 factor candidates). Output is `PortfolioReview` with per-position verdicts (`HOLD/ADD/TRIM/EXIT`) and portfolio-level insights (regime impact, concentration risk, hedge suggestions, diversifier suggestions). Max tokens: 3072 (larger than picks engine to handle multi-position output).
+
+**Universe endpoint**: GET `/signals` calls `compute_combined_factor_score(DB_PATH)`, joins with `universe` for company name and sector, and returns all 503 tickers ranked by composite score. Cached in-memory for 4 hours.
+
+**Live unrealized P&L**: `GET /portfolio/{id}` calls `_fetch_current_prices(tickers)` via yfinance (5-day window) for each open trade and attaches `current_price` and `unrealized_pnl = (current_price - entry_price) × shares` to each trade dict before returning. Fails gracefully — if yfinance is unavailable, `unrealized_pnl` is `null`.
 
 ### 6.2 Recommendation output format
 
@@ -303,7 +315,9 @@ Every recommendation is a typed dataclass (`engine/recommendation.py`). `Recomme
 | `target` | float | Entry plus 2× (entry minus stop_loss) |
 | `reward_risk` | float | Must be ≥ 2.0 — enforced in `__post_init__` |
 
-The engine returns a `RecommendationSet` containing: `recommendations` (list of `Recommendation`), `macro` (`MacroContext`).
+The engine returns a `RecommendationSet` containing: `recommendations` (list of `Recommendation`), `macro` (`MacroContext`), and optional `note` (string — set when the engine returns no picks, e.g. off-topic query).
+
+The review engine returns a `PortfolioReview` containing: `position_reviews` (list of `PositionReview` with `verdict`, `conviction`, `signal_summary`, `updated_thesis`, `risk_note`), `portfolio_insights` (`PortfolioInsights` with `regime_impact`, `concentration_risk`, `hedge_suggestions`, `diversifier_suggestions`), and `macro`.
 
 ### 6.3 Lookahead bias prevention
 
@@ -363,6 +377,7 @@ Daily ETL is triggered via GitHub Actions (see `.github/workflows/daily-etl.yml`
 | `QUANT_DB_PATH` | Yes | Render environment (`/data/quant.db`), `.env` locally |
 | `ANTHROPIC_API_KEY` | Yes | Render environment, `.env` locally |
 | `PAPER_ACCOUNT_VALUE` | Yes | Render environment (`100000`), `.env` locally |
+| `ETL_SECRET` | Yes | Render environment + GitHub Actions secret — must match |
 
 ### 8.3 Frontend deployment
 
