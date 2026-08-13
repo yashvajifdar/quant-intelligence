@@ -365,14 +365,27 @@ def get_signals() -> dict:
     return _signals_cache["data"]
 
 
-def _run_etl_background(with_fundamentals: bool) -> None:
-    """Runs in a FastAPI BackgroundTask — only used for slow fundamentals fetch."""
-    from etl.loader import run as etl_run
+def _run_fundamentals_subprocess() -> None:
+    """Spawn a separate process for the fundamentals ETL.
+
+    DuckDB does not allow a read-write connection when read-only connections
+    already exist in the same process. Running the ETL in a subprocess gives it
+    its own DuckDB connection context, avoiding the conflict entirely.
+    """
+    import subprocess
+    import sys
     try:
-        report = etl_run(full_refresh=False, with_fundamentals=with_fundamentals)
-        logger.info("Background ETL complete: %s", report)
+        result = subprocess.run(
+            [sys.executable, "-m", "etl.loader", "--with-fundamentals"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            logger.info("Fundamentals subprocess complete:\n%s", result.stdout)
+        else:
+            logger.error("Fundamentals subprocess failed (rc=%d):\n%s", result.returncode, result.stderr)
     except Exception:
-        logger.exception("Background ETL failed")
+        logger.exception("Failed to launch fundamentals subprocess")
 
 
 @app.post("/internal/run-etl")
@@ -385,38 +398,31 @@ def run_etl(
 
     Requires the X-Etl-Secret header to match the ETL_SECRET environment variable.
 
-    with_fundamentals=false (default): runs synchronously — universe, prices, macro.
-      Returns the quality report dict directly.
-    with_fundamentals=true: prices+macro run synchronously; the fundamentals fetch
-      (~7 min, serial per-ticker) runs as a background task so the HTTP response
-      returns immediately. Render would otherwise close the connection before it completes.
+    with_fundamentals=false (default): runs prices+macro synchronously and returns
+      the quality report directly.
+    with_fundamentals=true: prices+macro run synchronously first, then fundamentals
+      launches as a subprocess via BackgroundTask. A subprocess is required because
+      DuckDB rejects a read-write connection when read-only connections already exist
+      in the same process — the subprocess gets its own isolated connection.
     """
     if not ETL_SECRET or x_etl_secret != ETL_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     logger.info("ETL triggered via /internal/run-etl with_fundamentals=%s", with_fundamentals)
 
-    if with_fundamentals:
-        # Run prices+macro synchronously first so the caller gets a real report,
-        # then kick off the slow fundamentals fetch in the background.
-        try:
-            from etl.loader import run as etl_run
-            report = etl_run(full_refresh=False, with_fundamentals=False)
-            logger.info("Sync ETL complete: %s", report)
-        except Exception as exc:
-            logger.exception("Sync ETL failed")
-            raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
-        background_tasks.add_task(_run_etl_background, with_fundamentals=True)
-        return {"status": "ok", "report": report, "note": "fundamentals refresh started in background"}
-
     try:
         from etl.loader import run as etl_run
         report = etl_run(full_refresh=False, with_fundamentals=False)
-        logger.info("ETL complete: %s", report)
-        return {"status": "ok", "report": report}
+        logger.info("Sync ETL complete: %s", report)
     except Exception as exc:
-        logger.exception("ETL failed")
+        logger.exception("Sync ETL failed")
         raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
+
+    if with_fundamentals:
+        background_tasks.add_task(_run_fundamentals_subprocess)
+        return {"status": "ok", "report": report, "note": "fundamentals refresh started in background subprocess"}
+
+    return {"status": "ok", "report": report}
 
 
 @app.get("/leaderboard")
