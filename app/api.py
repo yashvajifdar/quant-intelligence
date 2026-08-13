@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 import duckdb
 import yfinance as yf
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -365,20 +365,53 @@ def get_signals() -> dict:
     return _signals_cache["data"]
 
 
+def _run_etl_background(with_fundamentals: bool) -> None:
+    """Runs in a FastAPI BackgroundTask — only used for slow fundamentals fetch."""
+    from etl.loader import run as etl_run
+    try:
+        report = etl_run(full_refresh=False, with_fundamentals=with_fundamentals)
+        logger.info("Background ETL complete: %s", report)
+    except Exception:
+        logger.exception("Background ETL failed")
+
+
 @app.post("/internal/run-etl")
-def run_etl(x_etl_secret: str = Header(default="")) -> dict:
-    """Trigger an incremental ETL run. Called by cron-job.org on a daily schedule.
+def run_etl(
+    background_tasks: BackgroundTasks,
+    x_etl_secret: str = Header(default=""),
+    with_fundamentals: bool = False,
+) -> dict:
+    """Trigger an ETL run. Called by GitHub Actions on a daily schedule.
 
     Requires the X-Etl-Secret header to match the ETL_SECRET environment variable.
-    Returns the quality report dict on success.
+
+    with_fundamentals=false (default): runs synchronously — universe, prices, macro.
+      Returns the quality report dict directly.
+    with_fundamentals=true: prices+macro run synchronously; the fundamentals fetch
+      (~7 min, serial per-ticker) runs as a background task so the HTTP response
+      returns immediately. Render would otherwise close the connection before it completes.
     """
     if not ETL_SECRET or x_etl_secret != ETL_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    logger.info("ETL triggered via /internal/run-etl")
+    logger.info("ETL triggered via /internal/run-etl with_fundamentals=%s", with_fundamentals)
+
+    if with_fundamentals:
+        # Run prices+macro synchronously first so the caller gets a real report,
+        # then kick off the slow fundamentals fetch in the background.
+        try:
+            from etl.loader import run as etl_run
+            report = etl_run(full_refresh=False, with_fundamentals=False)
+            logger.info("Sync ETL complete: %s", report)
+        except Exception as exc:
+            logger.exception("Sync ETL failed")
+            raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
+        background_tasks.add_task(_run_etl_background, with_fundamentals=True)
+        return {"status": "ok", "report": report, "note": "fundamentals refresh started in background"}
+
     try:
         from etl.loader import run as etl_run
-        report = etl_run(full_refresh=False)
+        report = etl_run(full_refresh=False, with_fundamentals=False)
         logger.info("ETL complete: %s", report)
         return {"status": "ok", "report": report}
     except Exception as exc:

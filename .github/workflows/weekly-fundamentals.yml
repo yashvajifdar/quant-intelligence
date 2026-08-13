@@ -1,0 +1,26 @@
+name: Weekly Fundamentals ETL
+
+on:
+  schedule:
+    # 12:00 UTC Saturday = 7:00 AM ET — runs once a week after markets close for the week
+    - cron: "0 12 * * 6"
+  workflow_dispatch: # allow manual trigger from GitHub Actions tab
+
+jobs:
+  run-fundamentals-etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger fundamentals ETL
+        run: |
+          response=$(curl -s -o /tmp/etl_response.json -w "%{http_code}" \
+            -X POST "https://quant-intelligence.onrender.com/internal/run-etl?with_fundamentals=true" \
+            -H "X-Etl-Secret: ${{ secrets.ETL_SECRET }}" \
+            -H "Content-Type: application/json")
+          echo "HTTP status: $response"
+          cat /tmp/etl_response.json
+          if [ "$response" != "200" ]; then
+            echo "ETL failed with HTTP $response"
+            exit 1
+          fi
+          echo "Fundamentals refresh started in background on Render service."
