@@ -1,6 +1,6 @@
 # Quant Intelligence — Architecture & Design Document
 
-*Last updated: 2026-06-12. Reflects actual codebase state.*
+*Last updated: 2026-08-12. Reflects actual codebase state.*
 
 **Not financial advice.** All recommendations are for paper trading and educational/demonstration purposes only.
 
@@ -42,7 +42,7 @@ DuckDB Warehouse  (data/quant.db)
          ▼
 Signals Layer  (signals/)
 ────────────────────────────────────────────────────────────────
-  factors.py        ──► Momentum 12-1, Low-Vol (value/quality planned)
+  factors.py        ──► Momentum 12-1, Low-Vol, Value composite, Quality composite
   technical.py      ──► MA50/200, RSI, MACD histogram, ATR, volume ratio
   macro_regime.py   ──► RISK_ON / TRANSITIONAL / RISK_OFF / CRISIS
   options_flow.py   ──► NOT YET BUILT (planned)
@@ -142,7 +142,7 @@ All tables live in `data/quant.db` (DuckDB). Schema is defined in `etl/schema.py
 | `free_cashflow` | DOUBLE | yfinance | |
 | `earnings_date` | DATE | yfinance | Next scheduled earnings |
 
-**Populated by:** `etl/ingest_fundamentals.py` (planned). Fetched weekly; fundamental data changes slowly enough that daily fetch is unnecessary.
+**Populated by:** `etl/ingest_fundamentals.py` → `load_fundamentals()`. Run with `python -m etl.loader --with-fundamentals`. Opt-in rather than daily default — serial per-ticker yfinance calls make it slow (~10–15 min for the full 500-ticker universe); fundamental data changes slowly enough that weekly scheduling is sufficient.
 
 ### 3.4 `macro`
 
@@ -213,7 +213,8 @@ The orchestrator is `etl/loader.py`. Run it with `python -m etl.loader` (increme
 | `etl/universe.py` | Fetches S&P 500 constituent list from Wikipedia via `pandas.read_html`. Replaces `.` with `-` in tickers. Upserts on ticker PK. Called on every run. |
 | `etl/ingest_prices.py` | Downloads OHLCV via `yfinance.download()` in batches of 100 tickers. `auto_adjust=True` means close equals adj_close. Incremental: last 7 days. Full refresh: 2 years. Batch failures are counted and reported; the run continues on partial failure. |
 | `etl/ingest_macro.py` | Fetches `T10Y2Y`, `FEDFUNDS`, `CPIAUCSL` from FRED via `fredapi`. Fetches `^VIX` from yfinance. Merges on date; forward-fills monthly series to daily. Incremental: 45-day lookback (longer than prices to catch monthly FRED updates). `_fetch_vix()` flattens MultiIndex columns before selecting Close — yfinance ≥0.2 returns MultiIndex even for a single ticker; without flattening, `raw[["Close"]]` silently returns an empty frame (commit a36be54). |
-| `etl/loader.py` | Calls `_validate_env()` to fail loudly if `FRED_API_KEY` is absent. Runs universe → prices → macro in sequence. Prints the quality report to stdout. |
+| `etl/ingest_fundamentals.py` | Fetches P/E, P/B, EV/EBITDA, ROE, gross margin, debt/equity, FCF, and earnings date via `yfinance.Ticker.info` — one ticker at a time (no batch endpoint). Designed for weekly scheduling, not daily. `tickers_failed` counts yfinance failures (`.info` is flaky for some tickers); run continues. |
+| `etl/loader.py` | Calls `_validate_env()` to fail loudly if `FRED_API_KEY` is absent. Runs universe → prices → macro → fundamentals (opt-in via `--with-fundamentals`) in sequence. Prints the quality report to stdout. |
 
 ### 4.2 Batch strategy
 
@@ -240,10 +241,12 @@ Every signal function requires a known-value test before merge. The `quant-finan
 |---|---|---|---|---|
 | Momentum 12-1 | `prices` | `(price_today / price_12m_ago) - 1`, excluding last 30 days | Stock outperformed peers over past year | Built |
 | Low volatility | `prices` | `1 / std_dev(daily_returns, 252)`, cross-sectionally ranked | Low realized volatility over past year | Built |
-| Value composite | `fundamentals` | Inverse-rank average of P/E, P/B, P/S, EV/EBITDA | Cheap relative to fundamentals | Planned |
-| Quality composite | `fundamentals` | Rank average of ROE, gross margin, inverse(debt_equity), FCF | Profitable, low-debt, cash-generating | Planned |
+| Value composite | `fundamentals` | Inverse-rank average of P/E, P/B, EV/EBITDA | Cheap relative to fundamentals | Built |
+| Quality composite | `fundamentals` | Rank average of ROE, gross margin, inverse(debt_equity), FCF | Profitable, low-debt, cash-generating | Built |
 
 Value and quality composites use cross-sectional ranking before averaging to prevent any single metric from dominating.
+
+`compute_combined_factor_score` combines all four factors with weights from ADR-0002: momentum 40% / quality 25% / low-vol 20% / value 15%. If the fundamentals table is empty (weekly ETL has not yet run), the function falls back to a two-factor composite (momentum + low-vol, rescaled to sum to 100%) so the API layer continues returning results.
 
 ### 5.2 Technical signals (`signals/technical.py`)
 

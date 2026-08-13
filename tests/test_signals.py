@@ -34,6 +34,8 @@ from signals.technical import (
 from signals.factors import (
     compute_momentum_scores,
     compute_lowvol_scores,
+    compute_value_scores,
+    compute_quality_scores,
     compute_combined_factor_score,
 )
 
@@ -285,6 +287,99 @@ class TestLowVolScores:
         assert (df["realized_vol"] >= 0).all()
 
 
+class TestValueScores:
+    def test_returns_dataframe(self, test_db):
+        df = compute_value_scores(test_db)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty
+
+    def test_expected_columns(self, test_db):
+        df = compute_value_scores(test_db)
+        for col in ["ticker", "value_score", "as_of_date"]:
+            assert col in df.columns
+
+    def test_jpm_cheapest_ranks_highest(self, test_db):
+        """JPM has the lowest P/E, P/B, and EV/EBITDA of the three — must score highest."""
+        df = compute_value_scores(test_db)
+        jpm  = df[df["ticker"] == "JPM"].iloc[0]["value_score"]
+        aapl = df[df["ticker"] == "AAPL"].iloc[0]["value_score"]
+        msft = df[df["ticker"] == "MSFT"].iloc[0]["value_score"]
+        assert jpm > aapl > msft
+
+    def test_known_values_n3(self, test_db):
+        """n=3, all three metrics identically ordered JPM<AAPL<MSFT (best to worst):
+        rank(pct=True, ascending=True) → (1/3, 2/3, 3/3); (1-pct)*100 → (66.7, 33.3, 0.0)."""
+        df = compute_value_scores(test_db)
+        jpm  = df[df["ticker"] == "JPM"].iloc[0]["value_score"]
+        aapl = df[df["ticker"] == "AAPL"].iloc[0]["value_score"]
+        msft = df[df["ticker"] == "MSFT"].iloc[0]["value_score"]
+        assert jpm  == pytest.approx(66.7, abs=0.1)
+        assert aapl == pytest.approx(33.3, abs=0.1)
+        assert msft == pytest.approx(0.0, abs=0.1)
+
+    def test_dedups_to_latest_fundamentals_row(self, test_db):
+        """AAPL has a stale duplicate row (pe_ratio=999, older fetched_date) —
+        the function must use the latest row (pe_ratio=25), not the stale one,
+        or AAPL would incorrectly rank as the most expensive ticker."""
+        df = compute_value_scores(test_db)
+        aapl_score = df[df["ticker"] == "AAPL"].iloc[0]["value_score"]
+        assert aapl_score > 0  # would be 0 (worst) if the pe_ratio=999 stale row leaked in
+
+    def test_value_scores_between_0_and_100(self, test_db):
+        df = compute_value_scores(test_db)
+        assert df["value_score"].between(0, 100).all()
+
+    def test_empty_fundamentals_returns_empty(self, tmp_path):
+        from etl.schema import initialize_schema
+        db = str(tmp_path / "empty.db")
+        initialize_schema(db)
+        df = compute_value_scores(db)
+        assert df.empty
+
+
+class TestQualityScores:
+    def test_returns_dataframe(self, test_db):
+        df = compute_quality_scores(test_db)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty
+
+    def test_expected_columns(self, test_db):
+        df = compute_quality_scores(test_db)
+        for col in ["ticker", "quality_score", "as_of_date"]:
+            assert col in df.columns
+
+    def test_aapl_best_quality(self, test_db):
+        """AAPL wins 3 of 4 quality metrics (ROE, gross margin, FCF) — must score highest.
+        JPM wins on debt/equity alone but still ranks above MSFT, which wins none."""
+        df = compute_quality_scores(test_db)
+        aapl = df[df["ticker"] == "AAPL"].iloc[0]["quality_score"]
+        jpm  = df[df["ticker"] == "JPM"].iloc[0]["quality_score"]
+        msft = df[df["ticker"] == "MSFT"].iloc[0]["quality_score"]
+        assert aapl > jpm > msft
+
+    def test_known_values_n3(self, test_db):
+        """AAPL: (100+100+33.3+100)/4=83.3 | JPM: (33.3+66.7+66.7+33.3)/4=50.0 |
+        MSFT: (66.7+33.3+0+66.7)/4=41.7 — see docstring math in compute_quality_scores."""
+        df = compute_quality_scores(test_db)
+        aapl = df[df["ticker"] == "AAPL"].iloc[0]["quality_score"]
+        jpm  = df[df["ticker"] == "JPM"].iloc[0]["quality_score"]
+        msft = df[df["ticker"] == "MSFT"].iloc[0]["quality_score"]
+        assert aapl == pytest.approx(83.3, abs=0.2)
+        assert jpm  == pytest.approx(50.0, abs=0.2)
+        assert msft == pytest.approx(41.7, abs=0.2)
+
+    def test_quality_scores_between_0_and_100(self, test_db):
+        df = compute_quality_scores(test_db)
+        assert df["quality_score"].between(0, 100).all()
+
+    def test_empty_fundamentals_returns_empty(self, tmp_path):
+        from etl.schema import initialize_schema
+        db = str(tmp_path / "empty.db")
+        initialize_schema(db)
+        df = compute_quality_scores(db)
+        assert df.empty
+
+
 class TestCombinedFactorScore:
     def test_returns_dataframe(self, test_db):
         df = compute_combined_factor_score(test_db)
@@ -292,8 +387,9 @@ class TestCombinedFactorScore:
         assert not df.empty
 
     def test_expected_columns(self, test_db):
+        """Four-factor composite exposes all four score columns."""
         df = compute_combined_factor_score(test_db)
-        for col in ["ticker", "momentum_rank", "lowvol_rank", "composite_score"]:
+        for col in ["ticker", "momentum_rank", "lowvol_rank", "value_score", "quality_score", "composite_score"]:
             assert col in df.columns
 
     def test_composite_score_between_0_and_100(self, test_db):
@@ -301,8 +397,66 @@ class TestCombinedFactorScore:
         assert df["composite_score"].between(0, 100).all()
 
     def test_aapl_scores_above_msft(self, test_db):
-        """AAPL has strong upward momentum — should outscore MSFT overall."""
+        """AAPL has strong momentum and quality — must outscore MSFT overall."""
         df = compute_combined_factor_score(test_db)
         aapl_score = df[df["ticker"] == "AAPL"].iloc[0]["composite_score"]
         msft_score = df[df["ticker"] == "MSFT"].iloc[0]["composite_score"]
         assert aapl_score > msft_score
+
+    def test_four_factor_weights_sum_to_one(self):
+        """Default weights must sum to 1.0 exactly (no rounding gap)."""
+        import inspect
+        from signals.factors import compute_combined_factor_score as fn
+        sig = inspect.signature(fn)
+        defaults = {
+            k: v.default
+            for k, v in sig.parameters.items()
+            if v.default is not inspect.Parameter.empty and k.endswith("_weight")
+        }
+        assert sum(defaults.values()) == pytest.approx(1.0, abs=1e-9)
+
+    def test_fallback_when_no_fundamentals(self, tmp_path):
+        """With an empty fundamentals table, falls back to two-factor composite
+        rather than returning an empty DataFrame."""
+        from etl.schema import initialize_schema
+        import duckdb, math
+        from datetime import date
+        db = str(tmp_path / "nofund.db")
+        initialize_schema(db)
+        dates = pd.bdate_range(start=date(2024, 1, 2), periods=300).date.tolist()
+        conn = duckdb.connect(db)
+        conn.executemany(
+            "INSERT INTO prices (ticker, date, open, high, low, close, adj_close, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (t, d,
+                 round(100 * (1 + 0.001) ** i * 0.99, 4),
+                 round(100 * (1 + 0.001) ** i * 1.01, 4),
+                 round(100 * (1 + 0.001) ** i * 0.98, 4),
+                 round(100 * (1 + 0.001) ** i, 4),
+                 round(100 * (1 + 0.001) ** i, 4),
+                 1_000_000)
+                for t in ["X", "Y"]
+                for i, d in enumerate(dates)
+            ],
+        )
+        conn.close()
+        df = compute_combined_factor_score(db)
+        assert not df.empty
+        assert "composite_score" in df.columns
+
+    def test_known_composite_value_aapl(self, test_db):
+        """Verify composite arithmetic with known factor ranks.
+
+        test_db: AAPL momentum=high(~100), lowvol=mid, quality=83.3, value=33.3
+        The exact rank values depend on the 3-ticker universe; what we can verify
+        is that AAPL's composite_score equals the weighted sum of its four sub-scores.
+        """
+        df = compute_combined_factor_score(test_db)
+        aapl = df[df["ticker"] == "AAPL"].iloc[0]
+        expected = (
+            aapl["momentum_rank"]  * 0.40 +
+            aapl["quality_score"]  * 0.25 +
+            aapl["lowvol_rank"]    * 0.20 +
+            aapl["value_score"]    * 0.15
+        )
+        assert aapl["composite_score"] == pytest.approx(expected, abs=0.15)

@@ -1,6 +1,6 @@
 # Quant Intelligence — Product Roadmap
 
-*Last updated: 2026-06-05. Milestones are sequential; each gates the next.*
+*Last updated: 2026-08-12. Milestones are sequential; each gates the next.*
 
 **Not financial advice.** All recommendations are for paper trading and educational/demonstration purposes only.
 
@@ -56,10 +56,12 @@ Completes without batch failures and the quality report shows:
 **Goal:** Every S&P 500 ticker has a daily composite signal score backed by factor, technical, and macro inputs.
 
 **Scope:**
-- `signals/factors.py`: momentum 12-1, value composite (P/E, P/B, P/S, EV/EBITDA), quality composite (ROE, gross margin, debt/equity, FCF), low volatility (252-day std dev)
-- `signals/technical.py`: MA50/200 crossover flag, RSI 14, MACD (12/26/9) crossover flag, ATR 14
-- `signals/macro_regime.py`: four-state classifier (RISK_ON / RISK_OFF / TRANSITIONAL / CRISIS)
-- Gold layer: `signals` table in `quant.db` with all scores joined per ticker per date
+- `signals/factors.py`: momentum 12-1, value composite (P/E, P/B, EV/EBITDA), quality composite (ROE, gross margin, debt/equity, FCF), low volatility (252-day std dev) — **all four built**
+- `signals/technical.py`: MA50/200 crossover flag, RSI 14, MACD (12/26/9) crossover flag, ATR 14 — **built**
+- `signals/macro_regime.py`: four-state classifier (RISK_ON / RISK_OFF / TRANSITIONAL / CRISIS) — **built**
+- `compute_combined_factor_score`: four-factor composite, weights per ADR-0002 (momentum 40% / quality 25% / low-vol 20% / value 15%) — **built**
+- `etl/ingest_fundamentals.py`: weekly fundamentals snapshot, wired into loader via `--with-fundamentals` flag — **built**
+- Gold layer: `signals` table in `quant.db` with all scores joined per ticker per date — **not yet built; requires ADR**
 - `quant-finance` agent review on every signal function before merge
 
 **Done when:** Every signal function has a known-value test. Example:
@@ -128,5 +130,5 @@ Running `python -m pytest tests/test_signals.py -v` passes with 0 failures.
 | yfinance rate-limiting or API breakage | High | High | Data source isolated to `etl/ingest_prices.py`. Batch size of 100 already limits request rate. Polygon.io is the fallback if Yahoo cuts access; cost is $29/month. |
 | DuckDB persistence on Render | Low (mitigated) | High | Render persistent disk ($1/month) mounts at `/data`. `QUANT_DB_PATH=/data/quant.db`. Without the disk, every deploy destroys price history. |
 | Unusual Whales API uncertainty | High | Medium | No official API. Options flow is a +1 modifier, not a core signal. MVP ships without it if a clean integration path is not found before M3. Write an ADR before any implementation work. |
-| Survivorship bias in signal backtesting | Certain | Medium | Wikipedia universe reflects current constituents only. Any performance number computed over historical data overstates returns because failed companies are absent. Document prominently on every public-facing page. |
+| Survivorship bias in signal backtesting | Certain | Medium | Wikipedia universe reflects current constituents only. Any performance number computed over historical data overstates returns because failed companies are absent. **Disclaimer added to Picks and Universe tabs** (2026-08-12). |
 | Not-financial-advice legal exposure | Low | High | Disclaimer on every public page and every recommendation output. No price targets framed as guarantees. Paper portfolio clearly labeled as simulated. No brokerage integration in scope. |

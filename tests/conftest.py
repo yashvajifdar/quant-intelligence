@@ -70,6 +70,20 @@ def _make_macro(dates: list[date], vix: float = 15.0, t10y2y: float = 0.5) -> li
     return [(d, t10y2y, 4.5, 300.0, vix) for d in dates]
 
 
+# Fundamentals fixture — deliberately chosen so value and quality rank in
+# clean, non-tied orderings for n=3 with pandas rank(pct=True):
+#   value:   JPM (cheapest on P/E, P/B, EV/EBITDA) > AAPL > MSFT
+#   quality: AAPL (best ROE, margin, FCF) > JPM (lowest debt/equity) > MSFT
+# columns: ticker, fetched_date, market_cap, pe_ratio, forward_pe, pb_ratio,
+#          ev_ebitda, revenue_growth, gross_margin, operating_margin,
+#          debt_equity, roe, free_cashflow, earnings_date
+_FUNDAMENTALS_ROWS = [
+    ("AAPL", None, 3.0e12, 25.0, 23.0, 8.0,  18.0, 0.08, 0.44, 0.30, 1.5, 0.35, 90e9, None),
+    ("MSFT", None, 2.5e12, 35.0, 32.0, 12.0, 25.0, 0.10, 0.34, 0.20, 2.2, 0.18, 50e9, None),
+    ("JPM",  None, 0.5e12, 10.0, None, 1.5,  8.0,  0.05, 0.38, 0.35, 0.5, 0.15, 30e9, None),
+]
+
+
 @pytest.fixture(scope="session")
 def test_db(tmp_path_factory) -> str:
     """Populated DuckDB in a temp directory. Reused across all tests in a session."""
@@ -99,6 +113,24 @@ def test_db(tmp_path_factory) -> str:
     conn.executemany(
         "INSERT INTO macro (date, t10y2y, fed_funds_rate, cpi, vix) VALUES (?, ?, ?, ?, ?)",
         _make_macro(dates),
+    )
+
+    # Latest fundamentals snapshot, plus one deliberately stale duplicate row for
+    # AAPL (older fetched_date, inverted pe_ratio) to prove the value/quality
+    # functions dedup via ROW_NUMBER/latest-fetched_date rather than picking up
+    # every historical snapshot.
+    latest_date = dates[-1]
+    stale_date  = dates[-8]  # one week earlier
+    fund_rows = [
+        (ticker, latest_date, *rest) for ticker, _, *rest in _FUNDAMENTALS_ROWS
+    ]
+    fund_rows.append(("AAPL", stale_date, 3.0e12, 999.0, 999.0, 999.0, 999.0, 0.08, 0.44, 0.30, 1.5, 0.35, 90e9, None))
+
+    conn.executemany(
+        "INSERT INTO fundamentals (ticker, fetched_date, market_cap, pe_ratio, forward_pe, "
+        "pb_ratio, ev_ebitda, revenue_growth, gross_margin, operating_margin, debt_equity, "
+        "roe, free_cashflow, earnings_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        fund_rows,
     )
 
     conn.close()
