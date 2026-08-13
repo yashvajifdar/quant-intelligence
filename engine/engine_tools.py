@@ -126,11 +126,16 @@ def _get_top_factor_candidates(
     if df.empty:
         return {"candidates": [], "error": "Insufficient price data to compute factor scores"}
 
-    top = df.head(top_n)[["ticker", "momentum_rank", "lowvol_rank", "composite_score", "as_of_date"]]
+    import math
+    top = df.head(top_n)[["ticker", "momentum_rank", "lowvol_rank", "composite_score", "value_score", "quality_score", "as_of_date"]]
     records = top.to_dict(orient="records")
     for r in records:
         if hasattr(r.get("as_of_date"), "isoformat"):
             r["as_of_date"] = r["as_of_date"].isoformat()
+        # NaN is not JSON-serializable — coerce to None
+        for key in ("value_score", "quality_score"):
+            if isinstance(r.get(key), float) and math.isnan(r[key]):
+                r[key] = None
     return {"candidates": records, "universe_size": len(df)}
 
 
