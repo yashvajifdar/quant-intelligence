@@ -100,10 +100,12 @@ def _db_stats() -> dict:
         return {}
     try:
         conn = duckdb.connect(DB_PATH, read_only=True)
+        fundamentals_count = conn.execute("SELECT COUNT(*) FROM fundamentals").fetchone()[0]
         stats = {
-            "universe": conn.execute("SELECT COUNT(*) FROM universe").fetchone()[0],
-            "prices":   conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
-            "macro":    conn.execute("SELECT COUNT(*) FROM macro").fetchone()[0],
+            "universe":     conn.execute("SELECT COUNT(*) FROM universe").fetchone()[0],
+            "prices":       conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
+            "macro":        conn.execute("SELECT COUNT(*) FROM macro").fetchone()[0],
+            "fundamentals": fundamentals_count,
         }
         conn.close()
         return stats
@@ -396,6 +398,8 @@ def _run_fundamentals_subprocess() -> None:
         )
         if result.returncode == 0:
             logger.info("Fundamentals subprocess complete (rc=0)")
+            # Bust the signals cache so the next /signals call recomputes with all four factors
+            _signals_cache["data"] = None
         else:
             logger.error("Fundamentals subprocess failed (rc=%d)", result.returncode)
     except Exception:
