@@ -387,13 +387,11 @@ def _run_fundamentals_subprocess() -> None:
     try:
         result = subprocess.run(
             [sys.executable, "-m", "etl.loader", "--with-fundamentals"],
-            capture_output=True,
-            text=True,
         )
         if result.returncode == 0:
-            logger.info("Fundamentals subprocess complete:\n%s", result.stdout)
+            logger.info("Fundamentals subprocess complete (rc=0)")
         else:
-            logger.error("Fundamentals subprocess failed (rc=%d):\n%s", result.returncode, result.stderr)
+            logger.error("Fundamentals subprocess failed (rc=%d)", result.returncode)
     except Exception:
         logger.exception("Failed to launch fundamentals subprocess")
 
