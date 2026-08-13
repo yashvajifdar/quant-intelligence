@@ -89,18 +89,28 @@ def _fetch_current_prices(tickers: list[str]) -> dict[str, float]:
         return {}
 
 
-def _db_stats() -> dict[str, int]:
-    """Return row counts for each warehouse table."""
+def _db_stats() -> dict:
+    """Return row counts for each warehouse table.
+
+    Returns {"locked": true} if the ETL subprocess currently holds the write
+    lock — this keeps /health returning 200 so Render does not restart the
+    instance mid-ETL and kill the fundamentals fetch.
+    """
     if not os.path.exists(DB_PATH):
         return {}
-    conn = duckdb.connect(DB_PATH, read_only=True)
-    stats = {
-        "universe": conn.execute("SELECT COUNT(*) FROM universe").fetchone()[0],
-        "prices":   conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
-        "macro":    conn.execute("SELECT COUNT(*) FROM macro").fetchone()[0],
-    }
-    conn.close()
-    return stats
+    try:
+        conn = duckdb.connect(DB_PATH, read_only=True)
+        stats = {
+            "universe": conn.execute("SELECT COUNT(*) FROM universe").fetchone()[0],
+            "prices":   conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
+            "macro":    conn.execute("SELECT COUNT(*) FROM macro").fetchone()[0],
+        }
+        conn.close()
+        return stats
+    except Exception:
+        # DB is locked by the ETL subprocess — return a degraded response
+        # so /health stays 200 and Render does not restart the instance.
+        return {"locked": True, "reason": "ETL in progress"}
 
 
 def _ensure_db() -> None:
