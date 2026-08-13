@@ -343,12 +343,14 @@ def get_signals() -> dict:
     """Return all S&P 500 tickers ranked by composite factor score.
 
     Scores are cross-sectionally ranked 0–100 (higher = better).
-    Composite = 60% momentum (12-1 month) + 40% low-volatility (252-day).
-    Results are cached for 4 hours — scores only change after daily ETL.
+    Composite weights: momentum 40%, quality 25%, low-vol 20%, value 15%.
+    Falls back to 2-factor (momentum 60%, low-vol 40%) when fundamentals table
+    is empty. Results are cached for 4 hours — scores only change after daily ETL.
     """
     global _signals_cache
     now = datetime.utcnow()
     if _signals_cache["data"] is None or now > _signals_cache["expires_at"]:
+        import math
         scores = compute_combined_factor_score(DB_PATH)
         if scores.empty:
             raise HTTPException(status_code=503, detail="Signal data not available — run ETL first")
@@ -362,9 +364,13 @@ def get_signals() -> dict:
 
         as_of = str(as_of_row[0]) if as_of_row and as_of_row[0] else None
         merged = scores.merge(universe, on="ticker", how="left")
-        records = merged[
-            ["ticker", "company_name", "sector", "composite_score", "momentum_rank", "lowvol_rank"]
-        ].to_dict(orient="records")
+        cols = ["ticker", "company_name", "sector", "composite_score", "momentum_rank", "lowvol_rank", "value_score", "quality_score"]
+        # Replace NaN with None so JSON serialization is valid (NaN is not valid JSON)
+        records = (
+            merged[cols]
+            .where(merged[cols].apply(lambda s: s.map(lambda v: not (isinstance(v, float) and math.isnan(v)))), other=None)
+            .to_dict(orient="records")
+        )
 
         _signals_cache = {
             "data": {"tickers": records, "count": len(records), "as_of_date": as_of},
