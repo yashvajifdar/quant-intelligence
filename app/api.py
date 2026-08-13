@@ -392,7 +392,7 @@ def _run_fundamentals_subprocess() -> None:
     import sys
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "etl.loader", "--with-fundamentals"],
+            [sys.executable, "-m", "etl.loader", "--fundamentals-only"],
         )
         if result.returncode == 0:
             logger.info("Fundamentals subprocess complete (rc=0)")

@@ -313,7 +313,8 @@ def test_win_rate_known_values() -> None:
 
 
 def test_win_rate_empty() -> None:
-    assert win_rate([]) == 0.0
+    # None signals "no data yet" — distinct from a 0% win rate
+    assert win_rate([]) is None
 
 
 def test_win_rate_all_wins() -> None:
@@ -397,6 +398,6 @@ def test_compute_summary_returns_all_keys() -> None:
         "sharpe_ratio", "max_drawdown", "trade_count", "open_count",
     }
     assert set(result.keys()) == expected_keys
-    assert result["trade_count"] == 3
+    assert result["trade_count"] == 5  # closed(3) + open_count(2)
     assert result["open_count"] == 2
     assert result["win_rate"] == pytest.approx(2 / 3, rel=1e-3)
